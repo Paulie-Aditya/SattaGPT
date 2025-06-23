@@ -1,5 +1,6 @@
 import { google } from "@ai-sdk/google"
 import { streamText } from "ai"
+import { validateDebateTopic, sanitizeTopic } from "@/lib/safety"
 
 export const maxDuration = 60
 
@@ -123,20 +124,62 @@ Keep responses to 2-3 sentences maximum. End with an aspirational vision or prac
 }
 
 export async function POST(req: Request) {
-  const { messages, agent } = await req.json()
+  try {
+    const { messages, agent } = await req.json()
 
-  const agentData = POLITICAL_AGENTS[agent as keyof typeof POLITICAL_AGENTS]
-  if (!agentData) {
-    return new Response("Invalid agent", { status: 400 })
+    const agentData = POLITICAL_AGENTS[agent as keyof typeof POLITICAL_AGENTS]
+    if (!agentData) {
+      return new Response("Invalid agent", { status: 400 })
+    }
+
+    // Safety check: Validate the last user message for inappropriate content
+    const lastUserMessage = messages
+      .filter((m: any) => m.role === "user")
+      .pop()
+
+    if (lastUserMessage) {
+      // Extract topic from the message content
+      const content = lastUserMessage.content || ""
+      const topicMatch = content.match(/Topic:\s*(.+?)(?:\.|$)/i)
+      
+      if (topicMatch) {
+        const topic = topicMatch[1].trim()
+        const sanitizedTopic = sanitizeTopic(topic)
+        const safetyCheck = validateDebateTopic(sanitizedTopic)
+        
+        if (!safetyCheck.isSafe) {
+          return new Response(
+            JSON.stringify({
+              error: "Topic validation failed",
+              reason: safetyCheck.reason,
+              category: safetyCheck.category
+            }),
+            { 
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            }
+          )
+        }
+      }
+    }
+
+    const result = streamText({
+      model: google("gemini-1.5-flash"),
+      system: agentData.prompt,
+      messages,
+      temperature: 0.9,
+      maxTokens: 150,
+    })
+
+    return result.toDataStreamResponse()
+  } catch (error) {
+    console.error('Chat API error:', error)
+    return new Response(
+      JSON.stringify({ error: "Internal server error" }),
+      { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    )
   }
-
-  const result = streamText({
-    model: google("gemini-1.5-flash"),
-    system: agentData.prompt,
-    messages,
-    temperature: 0.9,
-    maxTokens: 150,
-  })
-
-  return result.toDataStreamResponse()
 }
